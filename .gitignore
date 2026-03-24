@@ -52,3 +52,4 @@ $RECYCLE.BIN/
 **/MDK-ARM/**/*.out
 **/MDK-ARM/**/*.hex
 **/MDK-ARM/**/*.bin
+**/MDK-ARM/**/*.htm
