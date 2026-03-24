@@ -1,0 +1,63 @@
+* text=auto
+
+*.c text eol=crlf
+*.h text eol=crlf
+*.cpp text eol=crlf
+*.hpp text eol=crlf
+*.cc text eol=crlf
+*.hh text eol=crlf
+*.cxx text eol=crlf
+*.hxx text eol=crlf
+*.inl text eol=crlf
+*.s text eol=crlf
+*.S text eol=crlf
+*.asm text eol=crlf
+*.ld text eol=crlf
+*.sct text eol=crlf
+
+*.txt text eol=crlf
+*.ini text eol=crlf
+*.cfg text eol=crlf
+*.json text eol=crlf
+*.xml text eol=crlf
+*.resx text eol=crlf
+*.config text eol=crlf
+*.props text eol=crlf
+*.targets text eol=crlf
+*.yml text eol=crlf
+*.yaml text eol=crlf
+*.ioc text eol=crlf
+.mxproject text eol=crlf
+
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf
+*.py text eol=lf
+*.cs text eol=crlf
+*.csproj text eol=crlf
+*.sln text eol=crlf
+*.slnx text eol=crlf
+*.settings text eol=crlf
+
+*.uvprojx text eol=crlf
+*.uvoptx text eol=crlf
+*.uvguix text eol=crlf
+*.uvmpw text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bmp binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.rar binary
+*.exe binary
+*.dll binary
+*.lib binary
+*.a binary
+*.o binary
+*.axf binary
+*.elf binary
+*.bin binary
