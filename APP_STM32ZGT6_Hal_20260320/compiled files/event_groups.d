@@ -1,0 +1,15 @@
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/event_groups.c
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: D:\01_Embedded\04_Tool\keil5\ARM\ARMCC\Bin\..\include\stdlib.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/FreeRTOS.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: D:\01_Embedded\04_Tool\keil5\ARM\ARMCC\Bin\..\include\stddef.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: D:\01_Embedded\04_Tool\keil5\ARM\ARMCC\Bin\..\include\stdint.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Core/Inc/FreeRTOSConfig.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/projdefs.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/portable.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/deprecated_definitions.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F/portmacro.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/mpu_wrappers.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/task.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/timers.h
+..\..\..\ota_iap_remote_upgrade_260301\app_stm32zgt6_hal_20260320\compiled files\event_groups.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/event_groups.h

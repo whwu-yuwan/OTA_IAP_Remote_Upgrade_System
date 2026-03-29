@@ -48,8 +48,8 @@
             <NotGenerated>0</NotGenerated>
             <InvalidFlash>1</InvalidFlash>
           </TargetStatus>
-          <OutputDirectory>Template_STM32ZGT6_20260320\</OutputDirectory>
-          <OutputName>Template_STM32ZGT6_20260320</OutputName>
+          <OutputDirectory>.\Template_STM32ZGT6_20260320\</OutputDirectory>
+          <OutputName>APP</OutputName>
           <CreateExecutable>1</CreateExecutable>
           <CreateLib>0</CreateLib>
           <CreateHexFile>1</CreateHexFile>
@@ -80,9 +80,9 @@
             <nStopB2X>0</nStopB2X>
           </BeforeMake>
           <AfterMake>
-            <RunUserProg1>0</RunUserProg1>
+            <RunUserProg1>1</RunUserProg1>
             <RunUserProg2>0</RunUserProg2>
-            <UserProg1Name></UserProg1Name>
+            <UserProg1Name>fromelf --bin --output D:\01_Embedded\01_Project\Ota_Iap_Remote_Upgrade_260301\APP_STM32ZGT6_Hal_20260320\MDK-ARM\Template_STM32ZGT6_20260320\APP.bin D:\01_Embedded\01_Project\Ota_Iap_Remote_Upgrade_260301\APP_STM32ZGT6_Hal_20260320\MDK-ARM\Template_STM32ZGT6_20260320\APP.axf</UserProg1Name>
             <UserProg2Name></UserProg2Name>
             <UserProg1Dos16Mode>0</UserProg1Dos16Mode>
             <UserProg2Dos16Mode>0</UserProg2Dos16Mode>
