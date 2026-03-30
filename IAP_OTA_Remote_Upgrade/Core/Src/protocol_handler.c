@@ -9,7 +9,7 @@
 // 协议接收缓冲区（全局，供中断使用）
 ProtocolRxBuffer_t g_protocol_rx_buf;
 extern volatile uint8_t g_stay_in_bootloader;
-extern volatile uint8_t g_update_finish;
+
 static uint8_t g_update_active = 0;          // 0=未升级 1=升级中
 static AppArea_t g_update_target = APP_AREA_NONE; // 当前目标区A/B
 static uint32_t g_update_addr = 0;           // 当前写入地址
@@ -221,6 +221,7 @@ void CMD_Handler_UpdateStart(ProtocolFrame_t *rx_frame, ProtocolFrame_t *tx_fram
 	g_update_total = info.size;          // 固件总长度
 	g_update_recv = 0;           // 已接收长度
 	UART_LogEnable(0U);
+	
     if (info.target == APP_AREA_A){
 		start_addr = Flash_GetSector(APP_A_SECTOR_START_ADDR);
 		end_addr  = Flash_GetSector(APP_A_SECTOR_START_ADDR + info.size - 1U);
@@ -337,7 +338,6 @@ void CMD_Handler_UpdateEnd(ProtocolFrame_t *rx_frame, ProtocolFrame_t *tx_frame)
 		return;
 	}
 	g_update_active = 0;
-	g_update_finish = 1;
 	Protocol_CreateResponse(tx_frame, CMD_ACK, NULL, 0);
 }
 
