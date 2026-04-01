@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "crc.h"
+#include "lwip.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -188,6 +189,7 @@ static void Boot_JumpToRunApp(void)
   */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -212,6 +214,7 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_CRC_Init();
+  MX_LWIP_Init();
   /* USER CODE BEGIN 2 */
     HAL_Delay(100);
     
@@ -392,7 +395,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 0 */
 
   /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM1) {
+  if (htim->Instance == TIM1)
+  {
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
@@ -414,8 +418,7 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
-
-#ifdef  USE_FULL_ASSERT
+#ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.
