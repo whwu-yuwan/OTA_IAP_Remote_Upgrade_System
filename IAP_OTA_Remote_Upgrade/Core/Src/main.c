@@ -31,6 +31,7 @@
 #include "crc16.h"
 #include "protocol_handler.h"
 #include "usart.h"
+#include "eth_tcp_server.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -216,6 +217,7 @@ int main(void)
   MX_CRC_Init();
   MX_LWIP_Init();
   /* USER CODE BEGIN 2 */
+    EthTcpServer_Init(5000, 0);
     HAL_Delay(100);
     
     printf("\r\n\r\n");
@@ -255,17 +257,20 @@ int main(void)
     printf("\r\n");
 
     printf(">>> Protocol Test Started...\r\n");
-    for (int i = 0; i < 10; i++) {
-        printf("    Test %d...\r\n", i + 1);
+    int count = 0;
+    for (int i = 0; i < 1000; i++) {
+        count++;
+        if (count % 500 == 0) {
+            printf("    Test %d...\r\n", （i + 1）/500);
+        }
         if (g_stay_in_bootloader) {
           printf("    Stay in Bootloader permanent wait mode\r\n");
           break;
         }
-        HAL_Delay(1000);
+        MX_LWIP_Process();
+        EthTcpServer_Poll();
+        HAL_Delay(10);
     }
-		
-    
-		
 		
     if (!g_stay_in_bootloader) {
 				printf("    Jump to RunApp Start...\r\n");
@@ -319,6 +324,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    MX_LWIP_Process();
+    EthTcpServer_Poll();
     if (g_update_finish){
 				Param_Load(&param);
 				if (param.run_app_status == APP_STATUS_VALID){
