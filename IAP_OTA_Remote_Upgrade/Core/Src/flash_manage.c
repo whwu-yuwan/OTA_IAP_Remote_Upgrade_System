@@ -187,7 +187,6 @@ void Param_Init(FlashParam_t *param){
 	param->update_target = APP_AREA_NONE;
 	
 	param->crc32 = CalcCRC32((uint32_t *)param, (sizeof(FlashParam_t) - 4U)/4U);
-	//printf("[param] param init success \r\n");
 }
 
 void Param_Print(FlashParam_t *param){

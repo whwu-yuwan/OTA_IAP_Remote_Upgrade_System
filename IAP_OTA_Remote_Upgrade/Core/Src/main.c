@@ -68,6 +68,7 @@ void SystemClock_Config(void);
 static uint8_t Boot_CopySelectedAppToRun(void);
 static uint8_t Boot_IsRunAppValid(void);
 static void Boot_JumpToRunApp(void);
+static uint8_t Boot_CopyRunAndJump(FlashParam_t *param, const char *copy_fail_log);
 static void Eth_OnBytes(const uint8_t *data, uint16_t len);
 /* USER CODE END PFP */
 
@@ -187,6 +188,32 @@ static void Boot_JumpToRunApp(void)
 
     while (1) { }
 }
+
+  static uint8_t Boot_CopyRunAndJump(FlashParam_t *param, const char *copy_fail_log)
+  {
+    if (param == NULL) {
+      return 1U;
+    }
+
+    if (Boot_CopySelectedAppToRun() == 0U) {
+      printf("    Copy to RunApp success...\r\n");
+      if (Boot_IsRunAppValid() == 0U) {
+        Boot_JumpToRunApp();
+        return 0U;
+      }
+
+      param->run_app_status = APP_STATUS_INVALID;
+      if (Param_Save(param) != 0U) {
+        printf("    Save param failed...\r\n");
+        return 1U;
+      }
+      printf("    RunApp invalid/CRC failed/Vector invalid...\r\n");
+    } else {
+      printf("%s", copy_fail_log);
+    }
+
+    return 1U;
+  }
 /* 以太网接收回调 
 extern struct netif gnetif;
 extern uint8_t IP_ADDRESS[4];
@@ -205,6 +232,20 @@ static void Print_NetInfo(void)
     printf("\r\n");
 }
 */
+
+	static uint8_t Run_App_Update(AppArea_t App){
+			FlashParam_t param;
+      if (Param_Load(&param) != 0U) {
+          printf("    Load param failed...\r\n");
+          return 1U;
+      }
+			param.boot_select = App;
+      if (Param_Save(&param) != 0U){
+					printf("    Save param failed...\r\n");
+          return 1U;
+			}
+      return Boot_CopyRunAndJump(&param, "    Copy to RunApp failed...\r\n");
+	}
 
   static void Eth_OnBytes(const uint8_t *data, uint16_t len)
   {
@@ -315,13 +356,24 @@ int main(void)
 		
     if (!g_stay_in_bootloader) {
 				printf("    Jump to RunApp Start...\r\n");
-				// 先检查看是否选择了App区域 若选择了则检查RunApp是否有效
+				
+        if (((param.app_a_status == APP_STATUS_VALID) && (param.app_a_version > param.run_app_version) ))
+        {
+						Run_App_Update(APP_AREA_A);
+        }
+				else if((param.app_b_status == APP_STATUS_VALID) && (param.app_b_version > param.run_app_version)){
+						Run_App_Update(APP_AREA_B);
+				}
+
+        if (Param_Load(&param) != 0U) {
+            printf("    Reload param failed...\r\n");
+        }
+        
         if (param.run_app_status == APP_STATUS_VALID) {
             if (Boot_IsRunAppValid() == 0U) {
 								printf("    run_app is runnable , ready to jump to runapp...\r\n");
                 Boot_JumpToRunApp();
             } else {
-                // RunApp无效 则将参数中的run_app_status设置为无效
                 param.run_app_status = APP_STATUS_INVALID;
 								if (Param_Save(&param) != 0U) {
 										printf("    Save param failed...\r\n");
@@ -331,23 +383,8 @@ int main(void)
         }
 				// 若未选择App区域 或 RunApp状态无效 则尝试复制选中的App到RunApp
 				else if (param.boot_select == APP_AREA_NONE || param.run_app_status == APP_STATUS_INVALID) {  
-            printf("    Boot select none, start to copy to RunApp...\r\n");
-            if (Boot_CopySelectedAppToRun() == 0U) {
-                printf("    Copy to RunApp success...\r\n");
-                if (Boot_IsRunAppValid() == 0U) {
-                    Boot_JumpToRunApp();
-                } 
-								else {
-                    param.run_app_status = APP_STATUS_INVALID;
-                    if (Param_Save(&param) != 0U) {
-                        printf("    Save param failed...\r\n");
-                    }
-                    printf("    RunApp invalid/CRC failed/Vector invalid...\r\n");
-                }
-            }
-						else {
-                printf("    Copy to RunApp failed, stay in Bootloader...\r\n");
-            }
+            printf("    Boot select none/run invalid, start to copy to RunApp...\r\n");
+            Boot_CopyRunAndJump(&param, "    Copy to RunApp failed, stay in Bootloader...\r\n");
         }
     }
 		
@@ -381,7 +418,7 @@ int main(void)
 				if (param.run_app_status == APP_STATUS_VALID){
 					Boot_JumpToRunApp();
 				}
-				else if (Boot_CopySelectedAppToRun()){
+        else if (Boot_CopySelectedAppToRun() == 0U){
 					Boot_JumpToRunApp();
 				}
 		}
