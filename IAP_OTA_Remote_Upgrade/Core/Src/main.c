@@ -56,7 +56,8 @@
 
 /* USER CODE BEGIN PV */
 
-extern uint8_t g_uart_rx_byte;
+extern uint8_t g_uart1_rx_byte;
+extern uint8_t g_uart3_rx_byte;
 volatile uint8_t g_stay_in_bootloader = 0U;
 volatile uint8_t g_update_finish = 0U;
 volatile UpdateMethod_t g_update_method = no_update; 
@@ -306,8 +307,11 @@ int main(void)
   MX_LWIP_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-	
-    /*
+    //Wifi模块初始化
+    printf(">>> WiFi Initialization...\r\n");
+	Wifi_Init();
+    printf(">>> WiFi Done\r\n");
+
     Protocol_InitRxBuffer(&g_eth_protocol_rx_buf);
     EthTcpServer_Init(5000, Eth_OnBytes);
     s_eth_prev_connected = EthTcpServer_IsConnected();
@@ -317,42 +321,29 @@ int main(void)
     printf("=      STM32F407 IAP/OTA Bootloader     =\r\n");
     printf("=========================================\r\n");
     printf("\r\n");
-    
-    // 打印系统信息
-    printf(">>> System Information:\r\n");
-    printf("    MCU:       STM32F407ZGT6\r\n");
-    printf("    SYSCLK:    %du MHz\r\n", HAL_RCC_GetSysClockFreq() / 1000000);
-    printf("    Build:     %s %s\r\n", __DATE__, __TIME__);
-    printf("\r\n");
 	
-	
-	Wifi_Init();
-    
     // 初始化协议处理模块
     Protocol_Handler_Init();
     printf("\r\n");
     
-    // 打印Flash分区信息
-    Flash_PrintPartitionInfo();
-    
-		// 获取参数区参数
+	// 获取参数区参数
     FlashParam_t param;
     // 加载参数
     if (Param_Load(&param) != 0U) {
-				printf("Start param init \r\n");
-				Param_Init(&param);
-				printf("Start param save \r\n");
-				Param_Save(&param);
+	        printf("Start param init \r\n");
+		    Param_Init(&param);
+			printf("Start param save \r\n");
+			Param_Save(&param);
 		}
 		
     // 启动串口接收中断
     printf(">>> Starting UART receive interrupt...\r\n");
-    HAL_UART_Receive_IT(&huart1, &g_uart_rx_byte, 1);
+    HAL_UART_Receive_IT(&huart1, &g_uart1_rx_byte, 1);
+    HAL_UART_Receive_IT(&huart3, &g_uart3_rx_byte, 1);
     printf(">>> UART interrupt enabled\r\n");
     printf("\r\n");
 
-    printf(">>> Protocol Test Started...\r\n");
-		
+    printf(">>> Waiting For CMD...\r\n");		
     int tick = HAL_GetTick();
     while((HAL_GetTick() - tick) < 10000) {
         if (g_stay_in_bootloader) {
@@ -364,14 +355,14 @@ int main(void)
     }
 		
     if (!g_stay_in_bootloader) {
-				printf("    Jump to RunApp Start...\r\n");
+			printf("    Jump to RunApp Start...\r\n");
 				
         if (((param.app_a_status == APP_STATUS_VALID) && (param.app_a_version > param.run_app_version) ))
         {
-						Run_App_Update(APP_AREA_A);
+			Run_App_Update(APP_AREA_A);
         }
 				else if((param.app_b_status == APP_STATUS_VALID) && (param.app_b_version > param.run_app_version)){
-						Run_App_Update(APP_AREA_B);
+				Run_App_Update(APP_AREA_B);
 				}
 
         if (Param_Load(&param) != 0U) {
@@ -380,12 +371,12 @@ int main(void)
         
         if (param.run_app_status == APP_STATUS_VALID) {
             if (Boot_IsRunAppValid() == 0U) {
-								printf("    run_app is runnable , ready to jump to runapp...\r\n");
+            	printf("    run_app is runnable , ready to jump to runapp...\r\n");
                 Boot_JumpToRunApp();
             } else {
                 param.run_app_status = APP_STATUS_INVALID;
-								if (Param_Save(&param) != 0U) {
-										printf("    Save param failed...\r\n");
+					if (Param_Save(&param) != 0U) {
+    					printf("    Save param failed...\r\n");
                 }
                 printf("    RunApp invalid, check if app a or b is valid...\r\n");
             }
@@ -401,8 +392,9 @@ int main(void)
         printf("    Stay in Bootloader permanent wait mode\r\n");
     }
     
-		printf("timeout");
-    */
+	printf("timeout");
+    
+	
 	
     
   /* USER CODE END 2 */
@@ -414,11 +406,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    
-    /*
     MX_LWIP_Process();
     EthTcpServer_Poll();
-		
     uint8_t eth_now_connected = EthTcpServer_IsConnected();
     if ((s_eth_prev_connected == 1U) && (eth_now_connected == 0U)) {
       Protocol_InitRxBuffer(&g_eth_protocol_rx_buf);
@@ -428,15 +417,15 @@ int main(void)
     s_eth_prev_connected = eth_now_connected;
 		
     if (g_update_finish){
-				Param_Load(&param);
-				if (param.run_app_status == APP_STATUS_VALID){
-					Boot_JumpToRunApp();
-				}
+		Param_Load(&param);
+		if (param.run_app_status == APP_STATUS_VALID){
+	  		Boot_JumpToRunApp();
+	  	}
         else if (Boot_CopySelectedAppToRun() == 0U){
-					Boot_JumpToRunApp();
-				}
+			Boot_JumpToRunApp();
 		}
-    */
+	}
+    
   }
   /* USER CODE END 3 */
 }

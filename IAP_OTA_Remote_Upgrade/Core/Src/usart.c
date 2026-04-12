@@ -25,7 +25,8 @@
 #include "protocol.h"
 #include "protocol_handler.h"
 
-uint8_t g_uart_rx_byte;
+uint8_t g_uart1_rx_byte;
+uint8_t g_uart3_rx_byte;
 extern uint8_t g_stay_in_bootloader;
 /* USER CODE END 0 */
 
@@ -181,6 +182,9 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
 
     __HAL_LINKDMA(uartHandle,hdmatx,hdma_usart3_tx);
 
+    /* USART3 interrupt Init */
+    HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
   /* USER CODE BEGIN USART3_MspInit 1 */
 
   /* USER CODE END USART3_MspInit 1 */
@@ -227,6 +231,9 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     /* USART3 DMA DeInit */
     HAL_DMA_DeInit(uartHandle->hdmarx);
     HAL_DMA_DeInit(uartHandle->hdmatx);
+
+    /* USART3 interrupt Deinit */
+    HAL_NVIC_DisableIRQ(USART3_IRQn);
   /* USER CODE BEGIN USART3_MspDeInit 1 */
 
   /* USER CODE END USART3_MspDeInit 1 */
@@ -261,19 +268,40 @@ int fputc(int ch, FILE *f)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 	if (huart == &huart1){
 		uint8_t result;
-		result = Protocol_ReceiveByte(&g_protocol_rx_buf, g_uart_rx_byte);
+		result = Protocol_ReceiveByte(&g_protocol_uart1_rx_buf, g_uart1_rx_byte);
 		
 		if (result == 1){
 			ProtocolFrame_t frame;
 			
-		if (Protocol_Unpack(g_protocol_rx_buf.buffer, g_protocol_rx_buf.index, &frame) == 0){
+		if (Protocol_Unpack(g_protocol_uart1_rx_buf.buffer, g_protocol_uart1_rx_buf.index, &frame) == 0){
 			Protocol_HandleFrame(&frame, by_uart);
 		}
-		Protocol_InitRxBuffer(&g_protocol_rx_buf);
-		}
-    g_stay_in_bootloader = 1;
-	HAL_UART_Receive_IT(&huart1, &g_uart_rx_byte, 1);
+		Protocol_InitRxBuffer(&g_protocol_uart1_rx_buf);
+    }
+    else if (result == 2){
+      Protocol_InitRxBuffer(&g_protocol_uart1_rx_buf);
 	}
+        g_stay_in_bootloader = 1;
+	    HAL_UART_Receive_IT(&huart1, &g_uart1_rx_byte, 1);
+	}
+    else if (huart == &huart3){
+        uint8_t result;
+		result = Protocol_ReceiveByte(&g_protocol_uart3_rx_buf, g_uart3_rx_byte);
+		
+		if (result == 1){
+			ProtocolFrame_t frame;
+			
+		if (Protocol_Unpack(g_protocol_uart3_rx_buf.buffer, g_protocol_uart3_rx_buf.index, &frame) == 0){
+			Protocol_HandleFrame(&frame, by_wifi);
+		}
+		Protocol_InitRxBuffer(&g_protocol_uart3_rx_buf);
+    }
+    else if (result == 2){
+      Protocol_InitRxBuffer(&g_protocol_uart3_rx_buf);
+		}
+        g_stay_in_bootloader = 1;
+	    HAL_UART_Receive_IT(&huart3, &g_uart3_rx_byte, 1);
+    }
 }
 /* USER CODE END 1 */
 

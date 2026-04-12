@@ -4,11 +4,11 @@
 #include "protocol.h"
 #include "protocol_handler.h"
 #include "usart.h"
-#include "usart.h"
 #include "eth_tcp_server.h"
 
 // 协议接收缓冲区（全局，供中断使用）
-ProtocolRxBuffer_t g_protocol_rx_buf;
+ProtocolRxBuffer_t g_protocol_uart1_rx_buf;
+ProtocolRxBuffer_t g_protocol_uart3_rx_buf;
 extern volatile uint8_t g_stay_in_bootloader;
 extern volatile UpdateMethod_t g_update_method;
 
@@ -62,16 +62,16 @@ const CmdHandlerEntry_t g_cmd_handler_table[] = {
 
 //初始化协议模块
 void Protocol_Handler_Init(void){
-	Protocol_InitRxBuffer(&g_protocol_rx_buf);  
-	
+	Protocol_InitRxBuffer(&g_protocol_uart1_rx_buf);  
+	Protocol_InitRxBuffer(&g_protocol_uart3_rx_buf);
+	/*
 	printf("[Protocol] Handler initialized\r\n");
     printf("[Protocol] Registered %d commands:\r\n", CMD_HANDLER_COUNT);
     
     for (int i = 0; i < CMD_HANDLER_COUNT; i++) {
-        printf("  - 0x%04X: %s\r\n", 
-               g_cmd_handler_table[i].cmd,
-               g_cmd_handler_table[i].description);
+       printf("  - 0x%04X: %s\r\n", g_cmd_handler_table[i].cmd,g_cmd_handler_table[i].description);
     }
+	*/
 }
 
 void Protocol_HandleFrame(ProtocolFrame_t *rx_frame, UpdateMethod_t source){
@@ -102,7 +102,7 @@ void Protocol_HandleFrame(ProtocolFrame_t *rx_frame, UpdateMethod_t source){
 
 void Protocol_SendResponse(ProtocolFrame_t *frame, UpdateMethod_t source){
 	uint8_t tx_buffer[300];
-	uint8_t len;
+	uint16_t len;
 	extern UART_HandleTypeDef huart1;
 	
 	len = Protocol_Pack(frame, tx_buffer, sizeof(tx_buffer));
@@ -116,7 +116,16 @@ void Protocol_SendResponse(ProtocolFrame_t *frame, UpdateMethod_t source){
 			} else {
 				printf("[protocol] ETH send failed\r\n");
 			}
-		} else {
+		} 
+		else if (source == by_wifi) {
+			/* WiFi 通道：通过 ESP8266 发送 */
+			if (Wifi_SendDataToESP_Len(tx_buffer, len) == 0U) {
+				printf("[protocol] WiFi send data: 0x%04X (%d bytes)\r\n", frame->cmd, len);
+			} else {
+				printf("[protocol] WiFi send failed\r\n");
+			}
+		}
+		else {
 			/* UART 或其他通道：通过串口发送 */
 			HAL_UART_Transmit(&huart1, tx_buffer, len, 1000);
 			printf("[protocol] UART send data: 0x%04X (%d bytes)\r\n", frame->cmd, len);
@@ -173,7 +182,6 @@ void CMD_Handler_Reset(ProtocolFrame_t *rx_frame, ProtocolFrame_t *tx_frame){
 	printf("[CMD] reset command receive\r\n");
 	
 	Protocol_CreateResponse(tx_frame, CMD_ACK, NULL, 0);
-	Protocol_SendResponse(tx_frame, g_current_source);
 	
 	HAL_Delay(1000);
 	NVIC_SystemReset();

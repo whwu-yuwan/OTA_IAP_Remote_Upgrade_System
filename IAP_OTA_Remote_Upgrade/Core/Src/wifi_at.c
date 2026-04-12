@@ -54,13 +54,13 @@ static uint8_t Wifi_SendMessageToESPAndWaitTimeout(char* cmd, uint32_t timeout_m
 
 uint8_t Wifi_ConnectToAP(void){
 	HAL_Delay(2000);
-	if (Wifi_SendMessageToESPAndWait(AT_TEST, "OK") != WIFI_OK)
+	if (Wifi_SendMessageToESPAndWaitTimeout(AT_TEST, WIFI_AT_JOIN_TIMEOUT_MS, "OK") != WIFI_OK)
 	{
 		printf("Failed to connect to AP at AT_TEST\n");
 		return WIFI_ERROR;
 	}
 	
-	if (Wifi_SendMessageToESPAndWait(AT_RESET, "OK") != WIFI_OK)
+	if (Wifi_SendMessageToESPAndWaitTimeout(AT_RESET, WIFI_AT_REPLY_TIMEOUT_MS, "OK") != WIFI_OK)
 	{
 		printf("Failed to connect to AP at AT_RESET\n");
 		return WIFI_ERROR;
@@ -130,7 +130,20 @@ uint8_t ESP8266_StartTransparentTransmission(void){
 }
 
 uint8_t Wifi_SendDataToESP(const uint8_t* data){
+	
 	HAL_UART_Transmit(&huart3, data, strlen((char*)data), 1000);
+	return WIFI_OK;
+}
+
+uint8_t Wifi_SendDataToESP_Len(const uint8_t* data, uint16_t len){
+	if (data == NULL || len == 0U) {
+		return WIFI_ERROR;
+	}
+
+	if (HAL_UART_Transmit(&huart3, (uint8_t *)data, len, 1000) != HAL_OK) {
+		return WIFI_ERROR;
+	}
+
 	return WIFI_OK;
 }
 

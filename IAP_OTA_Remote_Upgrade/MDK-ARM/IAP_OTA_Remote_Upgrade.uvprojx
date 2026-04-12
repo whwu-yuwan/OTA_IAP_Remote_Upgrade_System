@@ -444,6 +444,16 @@
               <FilePath>..\Core\Inc\eth_tcp_server.h</FilePath>
             </File>
             <File>
+              <FileName>wifi_at.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\wifi_at.h</FilePath>
+            </File>
+            <File>
+              <FileName>wifi_at.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\wifi_at.c</FilePath>
+            </File>
+            <File>
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/main.c</FilePath>
@@ -686,16 +696,6 @@
               <FileName>stm32f4xx_hal_timebase_tim.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f4xx_hal_timebase_tim.c</FilePath>
-            </File>
-            <File>
-              <FileName>wifi_at.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Core\Inc\wifi_at.h</FilePath>
-            </File>
-            <File>
-              <FileName>wifi_at.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\Src\wifi_at.c</FilePath>
             </File>
           </Files>
         </Group>

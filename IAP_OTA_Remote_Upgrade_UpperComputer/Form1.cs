@@ -8,6 +8,7 @@ using System.IO.Ports;
 using System.Linq;
 using System.Diagnostics;
 using System.Net.Sockets;
+using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -39,9 +40,17 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
         private const int UpgradeChunkSize = 240; // UPDATE_DATA: 240字节数据，对应整帧252字节(240+12)
         private const uint DefaultTarget = 1;   // 1=APP_AREA_A, 2=APP_AREA_B
         private const uint DefaultVersion = 1;
+        private const int StartEndTimeoutMs = 5000;
+        private const int DataTimeoutMs = 2000;
+        private const int PacketRetryMax = 3;
+        private static readonly int[] PacketBackoffMs = new[] { 300, 600, 1000 };
+        private const int ReconnectRetryMax = 3;
+        private const int ReconnectIntervalMs = 1000;
+        private const int ReconnectWindowMs = 30000;
 
         private readonly SerialPort sp1 = new SerialPort();
         private TcpClient _tcpClient;
+        private TcpListener _tcpListener;
         private readonly List<byte> _rxFrameBuffer = new List<byte>();
         private readonly object _rxLock = new object();
         private readonly Decoder _utf8Decoder = Encoding.UTF8.GetDecoder();
@@ -51,6 +60,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
         private readonly AutoResetEvent _responseEvent = new AutoResetEvent(false);
         private readonly object _sessionLock = new object();
         private readonly object _transportLock = new object();
+        private readonly object _upgradeSessionLock = new object();
 
         private bool _isUpgrading = false;
         private bool _abortRequested = false;
@@ -58,7 +68,12 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
         private NetworkStream _tcpStream;
         private CancellationTokenSource _tcpReceiveCts;
         private Task _tcpReceiveTask;
+        private CancellationTokenSource _tcpAcceptCts;
+        private Task _tcpAcceptTask;
         private TransportKind _activeTransport = TransportKind.None;
+        private TransportKind _upgradeSessionOwner = TransportKind.None;
+        private int _lastTcpModeIndex = 1;
+        private bool _suppressTcpModeChangeEvent = false;
 
         private enum CommandResultKind
         {
@@ -77,6 +92,18 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
             None = 0,
             Serial = 1,
             Tcp = 2
+        }
+
+        private enum UpgradeResultCode
+        {
+            OK,
+            TIMEOUT,
+            NACK,
+            BUSY,
+            CRC_ERR,
+            LEN_ERR,
+            DISCONNECTED,
+            RETRY_EXHAUSTED
         }
 
         private sealed class PendingCommandSession
@@ -139,7 +166,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
         {
             if (_activeTransport == TransportKind.None)
             {
-                AppendLog("[ERR] 请先打开串口或连接TCP！", Color.Red);
+                AppendStructuredLog("NONE", command.ToString(), "-", 0, UpgradeResultCode.DISCONNECTED, "transport-not-open", Color.Red);
                 return false;
             }
 
@@ -151,7 +178,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 {
                     if (!sp1.IsOpen)
                     {
-                        AppendLog("[ERR] 串口未打开", Color.Red);
+                        AppendStructuredLog("UART", command.ToString(), "-", 0, UpgradeResultCode.DISCONNECTED, "serial-not-open", Color.Red);
                         return false;
                     }
 
@@ -163,7 +190,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                     {
                         if (_tcpStream == null || _tcpClient == null || !_tcpClient.Connected)
                         {
-                            AppendLog("[ERR] TCP未连接", Color.Red);
+                            AppendStructuredLog("WiFi", command.ToString(), "-", 0, UpgradeResultCode.DISCONNECTED, "tcp-not-connected", Color.Red);
                             return false;
                         }
 
@@ -173,19 +200,19 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 }
                 else
                 {
-                    AppendLog("[ERR] 未知传输通道", Color.Red);
+                    AppendStructuredLog(_activeTransport.ToString(), command.ToString(), "-", 0, UpgradeResultCode.DISCONNECTED, "unknown-transport", Color.Red);
                     return false;
                 }
 
                 // 发送日志：显示命令和长度（不显示HEX）
                 int dataLen = data == null ? 0 : data.Length;
-                AppendLog($"[TX-{_activeTransport}] {command}, Length={dataLen}", Color.Blue);
+                AppendStructuredLog(_activeTransport.ToString(), command.ToString(), dataLen.ToString(), 0, UpgradeResultCode.OK, "tx", Color.Blue);
 
                 return true;
             }
             catch (Exception ex)
             {
-                AppendLog("[ERR] 发送数据失败: " + ex.Message, Color.Red);
+                AppendStructuredLog(_activeTransport.ToString(), command.ToString(), "-", 0, UpgradeResultCode.DISCONNECTED, ex.Message, Color.Red);
                 return false;
             }
         }
@@ -234,6 +261,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
         private void CloseTcpTransport()
         {
             try { StopTcpReceiveLoop(); } catch { }
+            try { StopTcpAcceptLoop(); } catch { }
 
             lock (_transportLock)
             {
@@ -256,11 +284,23 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                     }
                 }
                 catch { }
+
+                try
+                {
+                    if (_tcpListener != null)
+                    {
+                        _tcpListener.Stop();
+                        _tcpListener = null;
+                    }
+                }
+                catch { }
             }
 
             _tcpStream = null;
             _tcpReceiveTask = null;
             _tcpReceiveCts = null;
+            _tcpAcceptTask = null;
+            _tcpAcceptCts = null;
 
             if (_activeTransport == TransportKind.Tcp)
             {
@@ -270,23 +310,146 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
 
         private void OpenTcpTransport(string host, int port)
         {
+            if (_tcpClient != null || _tcpStream != null || _tcpListener != null)
+            {
+                CloseTcpTransport();
+            }
+
             lock (_transportLock)
             {
-                if (_tcpClient != null && _tcpClient.Connected)
-                {
-                    CloseTcpTransport();
-                }
-
                 _tcpClient = new TcpClient();
                 _tcpClient.Connect(host, port);
                 _tcpStream = _tcpClient.GetStream();
-                // 不对读超时做强制断链；lwIP端可能在空闲时不立即回包
                 _tcpStream.ReadTimeout = Timeout.Infinite;
                 _tcpStream.WriteTimeout = 3000;
             }
 
             _activeTransport = TransportKind.Tcp;
             StartTcpReceiveLoop();
+        }
+
+        private bool IsTcpServerMode()
+        {
+            return comboBox5 != null && comboBox5.SelectedIndex == 1;
+        }
+
+        private void StopTcpAcceptLoop()
+        {
+            try
+            {
+                if (_tcpAcceptCts != null)
+                {
+                    _tcpAcceptCts.Cancel();
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (_tcpListener != null)
+                {
+                    _tcpListener.Stop();
+                }
+            }
+            catch { }
+        }
+
+        private IPAddress ResolveServerBindAddress(string bindText)
+        {
+            string input = (bindText ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(input) || input == "*" || input.Equals("any", StringComparison.OrdinalIgnoreCase) || input == "0.0.0.0")
+            {
+                return IPAddress.Any;
+            }
+
+            IPAddress ip;
+            if (!IPAddress.TryParse(input, out ip))
+            {
+                throw new ArgumentException("监听IP无效，请输入本机网卡IP或0.0.0.0");
+            }
+
+            return ip;
+        }
+
+        private void StartTcpServer(string bindIp, int port)
+        {
+            if (_tcpListener != null || _tcpClient != null || _tcpStream != null)
+            {
+                CloseTcpTransport();
+            }
+
+            IPAddress bindAddress = ResolveServerBindAddress(bindIp);
+
+            lock (_transportLock)
+            {
+                _tcpListener = new TcpListener(bindAddress, port);
+                _tcpListener.Start();
+            }
+
+            _tcpAcceptCts = new CancellationTokenSource();
+            var token = _tcpAcceptCts.Token;
+            _tcpAcceptTask = Task.Run(() => TcpAcceptLoop(token), token);
+
+            AppendStructuredLog("WiFi", "LISTEN", port.ToString(), 0, UpgradeResultCode.OK, $"server-listening:{bindAddress}", Color.DarkGreen);
+        }
+
+        private void TcpAcceptLoop(CancellationToken token)
+        {
+            try
+            {
+                TcpClient accepted = _tcpListener.AcceptTcpClient();
+                if (token.IsCancellationRequested)
+                {
+                    accepted.Close();
+                    return;
+                }
+
+                lock (_transportLock)
+                {
+                    _tcpClient = accepted;
+                    _tcpStream = _tcpClient.GetStream();
+                    _tcpStream.ReadTimeout = Timeout.Infinite;
+                    _tcpStream.WriteTimeout = 3000;
+                }
+
+                _activeTransport = TransportKind.Tcp;
+                this.BeginInvoke(new Action(() =>
+                {
+                    button1.Text = "断开TCP";
+                }));
+
+                AppendStructuredLog("WiFi", "ACCEPT", "-", 0, UpgradeResultCode.OK, "server-accepted", Color.DarkGreen);
+                StartTcpReceiveLoop();
+            }
+            catch (ObjectDisposedException)
+            {
+                // 关闭监听时正常退出
+            }
+            catch (SocketException ex)
+            {
+                if (!token.IsCancellationRequested)
+                {
+                    AppendStructuredLog("WiFi", "LISTEN", "-", 0, UpgradeResultCode.DISCONNECTED, ex.Message, Color.DarkOrange);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!token.IsCancellationRequested)
+                {
+                    AppendStructuredLog("WiFi", "LISTEN", "-", 0, UpgradeResultCode.DISCONNECTED, ex.Message, Color.DarkOrange);
+                }
+            }
+            finally
+            {
+                lock (_transportLock)
+                {
+                    if (_tcpListener != null)
+                    {
+                        try { _tcpListener.Stop(); } catch { }
+                        _tcpListener = null;
+                    }
+                }
+            }
         }
 
         private void TcpReceiveLoop(CancellationToken token)
@@ -321,7 +484,6 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
             }
             catch (IOException ex)
             {
-                // 读超时/暂时无数据不应视为断链
                 var sockEx = ex.InnerException as SocketException;
                 if (sockEx != null)
                 {
@@ -333,7 +495,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
 
                 if (!token.IsCancellationRequested)
                 {
-                    AppendLog("[TCP] 接收线程退出: " + ex.Message, Color.DarkOrange);
+                    AppendStructuredLog("WiFi", "RX", "-", 0, UpgradeResultCode.DISCONNECTED, ex.Message, Color.DarkOrange);
                 }
             }
             catch (SocketException ex)
@@ -342,7 +504,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 {
                     if (ex.SocketErrorCode != SocketError.TimedOut && ex.SocketErrorCode != SocketError.WouldBlock)
                     {
-                        AppendLog("[TCP] 接收线程退出: " + ex.Message, Color.DarkOrange);
+                        AppendStructuredLog("WiFi", "RX", "-", 0, UpgradeResultCode.DISCONNECTED, ex.Message, Color.DarkOrange);
                     }
                 }
             }
@@ -354,18 +516,28 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
             {
                 if (!token.IsCancellationRequested)
                 {
-                    AppendLog("[TCP] 接收线程退出: " + ex.Message, Color.DarkOrange);
+                    AppendStructuredLog("WiFi", "RX", "-", 0, UpgradeResultCode.DISCONNECTED, ex.Message, Color.DarkOrange);
                 }
             }
             finally
             {
                 if (_activeTransport == TransportKind.Tcp)
                 {
-                    AppendLog("[TCP] 连接已断开", Color.DarkOrange);
+                    AppendStructuredLog("WiFi", "LINK", "-", 0, UpgradeResultCode.DISCONNECTED, "tcp-disconnected", Color.DarkOrange);
                     _activeTransport = TransportKind.None;
+                    lock (_sessionLock)
+                    {
+                        _pendingSession = null;
+                    }
+                    _responseEvent.Set();
+
                     this.BeginInvoke(new Action(() =>
                     {
                         button1.Text = "连接/断开";
+                    }));
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        comboBox5_SelectedIndexChanged(comboBox5, EventArgs.Empty);
                     }));
                 }
             }
@@ -589,7 +761,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                         {
                             retryCount++;
                             int delayMs = GetBackoffDelayMs(attempt, busyMinDelayMs, busyMaxDelayMs);
-                            AppendLog($"[协议] {cmd} 收到 BUSY，{delayMs}ms 后退避重试({retryCount}/{maxBusyRetry})", Color.DarkOrange);
+                            AppendStructuredLog(_activeTransport.ToString(), cmd.ToString(), "-", retryCount, UpgradeResultCode.BUSY, $"backoff={delayMs}ms", Color.DarkOrange);
                             Thread.Sleep(delayMs);
                             continue;
                         }
@@ -613,7 +785,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
         {
             if (result == null)
             {
-                AppendLog($"[ERR] {cmd} 无结果", Color.Red);
+                AppendStructuredLog(_activeTransport.ToString(), cmd.ToString(), "-", 0, UpgradeResultCode.RETRY_EXHAUSTED, "null-result", Color.Red);
                 return false;
             }
 
@@ -622,31 +794,8 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 return true;
             }
 
-            if (result.Result == CommandResultKind.Busy)
-            {
-                AppendLog($"[ERR] {cmd} 收到 BUSY，重试已达上限", Color.Red);
-                return false;
-            }
-
-            if (result.Result == CommandResultKind.Nack)
-            {
-                AppendLog($"[ERR] {cmd} 收到 NACK", Color.Red);
-                return false;
-            }
-
-            if (result.Result == CommandResultKind.Timeout)
-            {
-                AppendLog($"[ERR] 等待 {cmd} 响应超时", Color.Red);
-                return false;
-            }
-
-            if (result.Result == CommandResultKind.Aborted)
-            {
-                AppendLog($"[ERR] {cmd} 被本地 ABORT 中断", Color.OrangeRed);
-                return false;
-            }
-
-            AppendLog($"[ERR] {cmd} 失败, Result={result.Result}", Color.Red);
+            UpgradeResultCode code = MapResultCode(result.Result);
+            AppendStructuredLog(_activeTransport.ToString(), cmd.ToString(), "-", result.RetryCount, code, result.Result.ToString(), Color.Red);
             return false;
         }
 
@@ -654,165 +803,188 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
         {
             _abortRequested = true;
             _isUpgrading = false;
+            lock (_sessionLock)
+            {
+                _pendingSession = null;
+            }
+            _responseEvent.Set();
+
             this.BeginInvoke(new Action(() =>
             {
                 button5.Enabled = true;
             }));
 
-            AppendLog("[UPG-ABORT] 本地会话已回到 idle: " + reason, Color.DarkOrange);
+            AppendStructuredLog(_activeTransport.ToString(), "UPGRADE-IDLE", "-", 0, UpgradeResultCode.OK, reason, Color.DarkOrange);
         }
 
         private void SendAbortNow(string reason)
         {
-            if (_activeTransport == TransportKind.None)
+            bool linkOnline = IsTransportOnline(_activeTransport);
+            SetUpgradeIdleImmediately(reason);
+
+            if (!linkOnline)
             {
-                AppendLog("[UPG-ABORT] 当前无可用通道，无法发送 ABORT", Color.Red);
+                AppendStructuredLog(_activeTransport.ToString(), OtaCommand.CMD_UPDATE_ABORT.ToString(), "-", 0, UpgradeResultCode.DISCONNECTED, "skip-send-link-offline", Color.DarkOrange);
                 return;
             }
 
-            SetUpgradeIdleImmediately(reason);
-
-            Task.Run(() =>
-            {
-                var abortResult = SendCommandInSingleFlight(OtaCommand.CMD_UPDATE_ABORT, null, 3000, false, 10, 100, 500);
-
-                if (abortResult.Result == CommandResultKind.Ack)
-                {
-                    AppendLog("[UPG-ABORT] 设备返回 ACK，升级会话已中止", Color.DarkGreen);
-                }
-                else if (abortResult.Result == CommandResultKind.Nack)
-                {
-                    AppendLog("[UPG-ABORT] 设备返回 NACK（可能未处于升级态）", Color.OrangeRed);
-                }
-                else if (abortResult.Result == CommandResultKind.Busy)
-                {
-                    AppendLog("[UPG-ABORT] 设备返回 BUSY（通道占用）", Color.DarkOrange);
-                }
-                else if (abortResult.Result == CommandResultKind.Timeout)
-                {
-                    AppendLog("[UPG-ABORT] 等待设备响应超时", Color.Red);
-                }
-                else
-                {
-                    AppendLog("[UPG-ABORT] 发送失败: " + abortResult.Result, Color.Red);
-                }
-            });
+            SendAbortIfOnline(reason);
         }
 
         private bool RunUpgrade(string filePath, uint targetArea)
         {
-            bool startAcked = false;
-            int totalPackets = 0;
-            int busyTimes = 0;
-            int retryTimes = 0;
-            int failedPacket = -1;
-            string failedReason = "-";
-            Stopwatch totalSw = Stopwatch.StartNew();
+            DateTime recoverDeadline = DateTime.UtcNow.AddMilliseconds(ReconnectWindowMs);
+            int restartAttempt = 0;
 
-            try
+            while (true)
             {
-                _abortRequested = false;
+                restartAttempt++;
+                ResetUpgradeStartState();
+                AppendStructuredLog(_activeTransport.ToString(), "CMD_UPDATE_START", "0", restartAttempt - 1, UpgradeResultCode.OK, "full-restart", Color.Black);
 
-                byte[] raw = File.ReadAllBytes(filePath);
-                byte[] aligned = PadTo4Bytes(raw);
-                uint crc32 = CalculateCrc32Stm(aligned);
+                bool startAcked = false;
+                int totalPackets = 0;
+                int failedPacket = -1;
+                string failedReason = "-";
+                UpgradeResultCode lastCode = UpgradeResultCode.OK;
+                Stopwatch totalSw = Stopwatch.StartNew();
 
-                AppendLog($"[UPG] 原始大小: {raw.Length} 字节", Color.Black);
-                AppendLog($"[UPG] 对齐大小: {aligned.Length} 字节", Color.Black);
-                AppendLog($"[UPG] CRC32: 0x{crc32:X8}", Color.Black);
-
-                this.Invoke(new Action(() =>
+                try
                 {
-                    label2.Text = $"对齐大小: {aligned.Length} B";
-                    label3.Text = $"CRC32: 0x{crc32:X8}";
-                    progressBar1.Minimum = 0;
-                    progressBar1.Maximum = aligned.Length;
-                    progressBar1.Value = 0;
-                }));
+                    byte[] raw = File.ReadAllBytes(filePath);
+                    byte[] aligned = PadTo4Bytes(raw);
+                    uint crc32 = CalculateCrc32Stm(aligned);
 
-                // Start: target/version/size/crc32 (16字节, 小端)
-                List<byte> startData = new List<byte>(16);
-                startData.AddRange(BitConverter.GetBytes(targetArea));
-                startData.AddRange(BitConverter.GetBytes(DefaultVersion));
-                startData.AddRange(BitConverter.GetBytes((uint)aligned.Length));
-                startData.AddRange(BitConverter.GetBytes(crc32));
-
-                var startResult = SendCommandInSingleFlight(OtaCommand.CMD_UPDATE_START, startData.ToArray(), 8000, false, 10, 100, 500);
-                busyTimes += startResult.BusyCount;
-                retryTimes += startResult.RetryCount;
-                if (!HandleSessionResult(OtaCommand.CMD_UPDATE_START, startResult))
-                {
-                    failedReason = "START失败:" + startResult.Result;
-                    return false;
-                }
-                startAcked = true;
-
-                int sent = 0;
-                int packetIndex = 0;
-                while (sent < aligned.Length)
-                {
-                    if (_abortRequested)
-                    {
-                        failedReason = "用户触发ABORT";
-                        return false;
-                    }
-
-                    int len = Math.Min(UpgradeChunkSize, aligned.Length - sent);
-                    byte[] chunk = new byte[len];
-                    Buffer.BlockCopy(aligned, sent, chunk, 0, len);
-
-                    packetIndex++;
-                    totalPackets++;
-                    Stopwatch pktSw = Stopwatch.StartNew();
-                    var dataResult = SendCommandInSingleFlight(OtaCommand.CMD_UPDATE_DATA, chunk, 2000, false, 10, 100, 500);
-                    pktSw.Stop();
-
-                    busyTimes += dataResult.BusyCount;
-                    retryTimes += dataResult.RetryCount;
-                    string pktResultText = dataResult.Result.ToString().ToUpperInvariant();
-                    AppendLog($"[UPG-PKT] #{packetIndex}, Len={len}, Cost={pktSw.ElapsedMilliseconds}ms, Result={pktResultText}, Busy={dataResult.BusyCount}, Retry={dataResult.RetryCount}",
-                        dataResult.IsAckLikeSuccess ? Color.DarkGreen : Color.Red);
-
-                    if (!HandleSessionResult(OtaCommand.CMD_UPDATE_DATA, dataResult))
-                    {
-                        failedPacket = packetIndex;
-                        failedReason = "DATA失败:" + dataResult.Result;
-                        return false;
-                    }
-
-                    sent += len;
                     this.Invoke(new Action(() =>
                     {
-                        progressBar1.Value = sent;
+                        label2.Text = $"对齐大小: {aligned.Length} B";
+                        label3.Text = $"CRC32: 0x{crc32:X8}";
+                        progressBar1.Minimum = 0;
+                        progressBar1.Maximum = aligned.Length;
+                        progressBar1.Value = 0;
                     }));
+
+                    List<byte> startData = new List<byte>(16);
+                    startData.AddRange(BitConverter.GetBytes(targetArea));
+                    startData.AddRange(BitConverter.GetBytes(DefaultVersion));
+                    startData.AddRange(BitConverter.GetBytes((uint)aligned.Length));
+                    startData.AddRange(BitConverter.GetBytes(crc32));
+
+                    var startResult = SendCommandInSingleFlight(OtaCommand.CMD_UPDATE_START, startData.ToArray(), StartEndTimeoutMs, false, 0);
+                    lastCode = MapResultCode(startResult.Result);
+                    AppendStructuredLog(_activeTransport.ToString(), OtaCommand.CMD_UPDATE_START.ToString(), "0", 0, lastCode, "start", lastCode == UpgradeResultCode.OK ? Color.DarkGreen : Color.Red);
+                    if (!HandleSessionResult(OtaCommand.CMD_UPDATE_START, startResult))
+                    {
+                        failedReason = "START失败";
+                        return false;
+                    }
+                    startAcked = true;
+
+                    int sent = 0;
+                    int packetIndex = 0;
+                    while (sent < aligned.Length)
+                    {
+                        if (_abortRequested)
+                        {
+                            failedReason = "用户触发ABORT";
+                            return false;
+                        }
+
+                        int len = Math.Min(UpgradeChunkSize, aligned.Length - sent);
+                        byte[] chunk = new byte[len];
+                        Buffer.BlockCopy(aligned, sent, chunk, 0, len);
+
+                        packetIndex++;
+                        totalPackets++;
+
+                        CommandSessionResult dataResult = null;
+                        UpgradeResultCode dataCode = UpgradeResultCode.RETRY_EXHAUSTED;
+                        bool packetDone = false;
+
+                        for (int retry = 0; retry <= PacketRetryMax; retry++)
+                        {
+                            dataResult = SendCommandInSingleFlight(OtaCommand.CMD_UPDATE_DATA, chunk, DataTimeoutMs, false, 0);
+                            dataCode = MapResultCode(dataResult.Result);
+                            AppendStructuredLog(_activeTransport.ToString(), OtaCommand.CMD_UPDATE_DATA.ToString(), sent.ToString(), retry, dataCode, $"pkt={packetIndex}",
+                                dataCode == UpgradeResultCode.OK ? Color.DarkGreen : Color.DarkOrange);
+
+                            if (dataResult.IsAckLikeSuccess)
+                            {
+                                packetDone = true;
+                                break;
+                            }
+
+                            if (retry < PacketRetryMax)
+                            {
+                                Thread.Sleep(PacketBackoffMs[Math.Min(retry, PacketBackoffMs.Length - 1)]);
+                            }
+                        }
+
+                        if (!packetDone)
+                        {
+                            failedPacket = packetIndex;
+                            failedReason = "DATA失败";
+                            lastCode = dataCode == UpgradeResultCode.OK ? UpgradeResultCode.RETRY_EXHAUSTED : dataCode;
+                            return false;
+                        }
+
+                        sent += len;
+                        this.Invoke(new Action(() =>
+                        {
+                            progressBar1.Value = sent;
+                        }));
+                    }
+
+                    var endResult = SendCommandInSingleFlight(OtaCommand.CMD_UPDATE_END, null, StartEndTimeoutMs, false, 0);
+                    lastCode = MapResultCode(endResult.Result);
+                    AppendStructuredLog(_activeTransport.ToString(), OtaCommand.CMD_UPDATE_END.ToString(), totalPackets.ToString(), 0, lastCode, "end",
+                        lastCode == UpgradeResultCode.OK ? Color.DarkGreen : Color.Red);
+                    if (!HandleSessionResult(OtaCommand.CMD_UPDATE_END, endResult))
+                    {
+                        failedReason = "END失败";
+                        return false;
+                    }
+
+                    AppendStructuredLog(_activeTransport.ToString(), "UPGRADE", totalPackets.ToString(), restartAttempt - 1, UpgradeResultCode.OK, "completed", Color.DarkGreen);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    lastCode = UpgradeResultCode.DISCONNECTED;
+                    failedReason = ex.Message;
+                    AppendStructuredLog(_activeTransport.ToString(), "UPGRADE", failedPacket < 0 ? "-" : failedPacket.ToString(), restartAttempt - 1, lastCode, ex.Message, Color.Red);
+                }
+                finally
+                {
+                    totalSw.Stop();
+                    AppendStructuredLog(_activeTransport.ToString(), "UPGRADE-SUM", failedPacket < 0 ? totalPackets.ToString() : failedPacket.ToString(), restartAttempt - 1,
+                        lastCode, $"reason={failedReason},cost={totalSw.ElapsedMilliseconds}ms", Color.DarkBlue);
+
+                    if (!string.Equals(failedReason, "-", StringComparison.Ordinal) && startAcked && !_abortRequested)
+                    {
+                        if (IsTransportOnline(_activeTransport))
+                        {
+                            SendAbortIfOnline("upgrade-failed");
+                        }
+                    }
                 }
 
-                var endResult = SendCommandInSingleFlight(OtaCommand.CMD_UPDATE_END, null, 5000, false, 10, 100, 500);
-                busyTimes += endResult.BusyCount;
-                retryTimes += endResult.RetryCount;
-                if (!HandleSessionResult(OtaCommand.CMD_UPDATE_END, endResult))
+                if (_activeTransport != TransportKind.Tcp)
                 {
-                    failedReason = "END失败:" + endResult.Result;
                     return false;
                 }
 
-                AppendLog("[UPG] 升级完成，设备已通过校验", Color.DarkGreen);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                failedReason = "异常:" + ex.Message;
-                AppendLog("[ERR] 升级异常: " + ex.Message, Color.Red);
-                return false;
-            }
-            finally
-            {
-                totalSw.Stop();
-                AppendLog($"[UPG-SUM] TotalPkt={totalPackets}, Busy={busyTimes}, Retry={retryTimes}, TotalCost={totalSw.ElapsedMilliseconds}ms, FailPkt={(failedPacket < 0 ? "-" : failedPacket.ToString())}, Reason={failedReason}", Color.DarkBlue);
-
-                if (!string.Equals(failedReason, "-", StringComparison.Ordinal) && startAcked && !_abortRequested)
+                if (DateTime.UtcNow > recoverDeadline)
                 {
-                    SendAbortNow("升级失败自动ABORT");
+                    AppendStructuredLog("WiFi", "RECOVER", "-", restartAttempt - 1, UpgradeResultCode.RETRY_EXHAUSTED, "recover-window-timeout", Color.Red);
+                    return false;
+                }
+
+                bool recovered = TryRecoverTcpConnection(recoverDeadline);
+                if (!recovered)
+                {
+                    AppendStructuredLog("WiFi", "RECOVER", "-", restartAttempt - 1, UpgradeResultCode.DISCONNECTED, "reconnect-failed", Color.Red);
+                    return false;
                 }
             }
         }
@@ -877,6 +1049,13 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
 
         private void button2_Click(object sender, EventArgs e)
         {
+            if (_isUpgrading)
+            {
+                AppendStructuredLog("UART", "CHANNEL_SWITCH", "-", 0, UpgradeResultCode.BUSY, "upgrade-in-progress", Color.DarkOrange);
+                MessageBox.Show("升级进行中，禁止手工切换通道。");
+                return;
+            }
+
             try
             {
                 if (_activeTransport == TransportKind.Tcp)
@@ -897,7 +1076,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                     sp1.Open();
                     _activeTransport = TransportKind.Serial;
                     button2.Text = "关闭串口";
-                    AppendLog("[SERIAL] 串口已打开，当前通道=UART", Color.DarkGreen);
+                    AppendStructuredLog("UART", "OPEN", "-", 0, UpgradeResultCode.OK, "serial-opened", Color.DarkGreen);
                 }
                 else
                 {
@@ -907,7 +1086,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                         _activeTransport = TransportKind.None;
                     }
                     button2.Text = "打开串口";
-                    AppendLog("[SERIAL] 串口已关闭", Color.DarkOrange);
+                    AppendStructuredLog("UART", "CLOSE", "-", 0, UpgradeResultCode.OK, "serial-closed", Color.DarkOrange);
                 }
             }
             catch (Exception ex)
@@ -918,12 +1097,19 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
 
         private void button1_Click(object sender, EventArgs e)
         {
+            if (_isUpgrading)
+            {
+                AppendStructuredLog("WiFi", "CHANNEL_SWITCH", "-", 0, UpgradeResultCode.BUSY, "upgrade-in-progress", Color.DarkOrange);
+                MessageBox.Show("升级进行中，禁止手工切换通道。");
+                return;
+            }
+
             try
             {
-                if (_activeTransport == TransportKind.Tcp)
+                if (_activeTransport == TransportKind.Tcp || _tcpListener != null)
                 {
                     CloseTcpTransport();
-                    button1.Text = "连接/断开";
+                    comboBox5_SelectedIndexChanged(comboBox5, EventArgs.Empty);
                     return;
                 }
 
@@ -933,18 +1119,25 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                     button2.Text = "打开串口";
                 }
 
-                string host = textBox1.Text.Trim();
                 int port = int.Parse(textBox2.Text.Trim());
 
+                if (IsTcpServerMode())
+                {
+                    StartTcpServer(textBox1.Text.Trim(), port);
+                    button1.Text = "停止监听";
+                    return;
+                }
+
+                string host = textBox1.Text.Trim();
                 OpenTcpTransport(host, port);
                 button1.Text = "断开TCP";
-                AppendLog($"[TCP] 已连接 {host}:{port}", Color.DarkGreen);
+                AppendStructuredLog("WiFi", "CONNECT", port.ToString(), 0, UpgradeResultCode.OK, $"client-connected:{host}", Color.DarkGreen);
             }
             catch (Exception ex)
             {
-                AppendLog("[TCP] 连接失败: " + ex.Message, Color.Red);
+                AppendStructuredLog("WiFi", "CONNECT", "-", 0, UpgradeResultCode.DISCONNECTED, ex.Message, Color.Red);
                 CloseTcpTransport();
-                button1.Text = "连接/断开";
+                comboBox5_SelectedIndexChanged(comboBox5, EventArgs.Empty);
             }
         }
 
@@ -974,7 +1167,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
 
             comboBox2.Items.AddRange(SerialPort.GetPortNames());
 
-            textBox1.Text = "127.0.0.1";
+            textBox1.Text = "0.0.0.0";
             textBox2.Text = "5000";
 
             button1.Click += button1_Click;
@@ -996,6 +1189,16 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 "APP_B"
             });
             comboBox4.SelectedIndex = 0;
+
+            // TCP 模式：Client / Server
+            comboBox5.Items.Clear();
+            comboBox5.Items.AddRange(new string[]
+            {
+                "Client",
+                "Server"
+            });
+            comboBox5.SelectedIndex = 1;
+            comboBox5_SelectedIndexChanged(comboBox5, EventArgs.Empty);
 
             label1.Text = "文件大小：-";
             label2.Text = "对齐大小：-";
@@ -1041,7 +1244,7 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                         string line = _utf8RxBuffer.ToString(start, i - start).TrimEnd('\r');
                         if (!string.IsNullOrWhiteSpace(line))
                         {
-                            AppendLog("[RX-UTF8] " + line, Color.DarkCyan);
+                            AppendStructuredLog(_activeTransport.ToString(), "RX_TEXT", "-", 0, UpgradeResultCode.OK, line, Color.DarkCyan);
                         }
                         start = i + 1;
                     }
@@ -1052,13 +1255,12 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                     _utf8RxBuffer.Remove(0, start);
                 }
 
-                // 对于没有换行但累计较长的内容，也输出一次，避免看起来无日志
                 if (_utf8RxBuffer.Length >= 120)
                 {
                     string tail = _utf8RxBuffer.ToString().Trim();
                     if (!string.IsNullOrWhiteSpace(tail))
                     {
-                        AppendLog("[RX-UTF8] " + tail, Color.DarkCyan);
+                        AppendStructuredLog(_activeTransport.ToString(), "RX_TEXT", "-", 0, UpgradeResultCode.OK, tail, Color.DarkCyan);
                     }
                     _utf8RxBuffer.Clear();
                 }
@@ -1086,7 +1288,10 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
 
                 if (headerIndex < 0)
                 {
-                    _rxFrameBuffer.Clear();
+                    if (_rxFrameBuffer.Count > 1)
+                    {
+                        _rxFrameBuffer.RemoveRange(0, _rxFrameBuffer.Count - 1);
+                    }
                     return;
                 }
 
@@ -1100,8 +1305,9 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 }
 
                 ushort len = (ushort)(_rxFrameBuffer[4] | (_rxFrameBuffer[5] << 8));
-                if (len > 256)
+                if (len > 1024)
                 {
+                    AppendStructuredLog(_activeTransport.ToString(), "RX", "-", 0, UpgradeResultCode.LEN_ERR, $"len={len}", Color.Red);
                     _rxFrameBuffer.RemoveAt(0);
                     continue;
                 }
@@ -1113,15 +1319,16 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 }
 
                 byte[] frame = _rxFrameBuffer.GetRange(0, frameLen).ToArray();
-                _rxFrameBuffer.RemoveRange(0, frameLen);
-
                 ushort recvCrc = BitConverter.ToUInt16(frame, frameLen - 2);
                 ushort calcCrc = CalculateCRC16(frame.Take(frameLen - 2).ToArray());
                 if (recvCrc != calcCrc)
                 {
-                    AppendLog("[ERR] RX帧CRC错误", Color.Red);
+                    AppendStructuredLog(_activeTransport.ToString(), "RX", "-", 0, UpgradeResultCode.CRC_ERR, $"recv=0x{recvCrc:X4},calc=0x{calcCrc:X4}", Color.Red);
+                    _rxFrameBuffer.RemoveAt(0);
                     continue;
                 }
+
+                _rxFrameBuffer.RemoveRange(0, frameLen);
 
                 ushort cmd = BitConverter.ToUInt16(frame, 2);
                 byte[] data = len > 0 ? frame.Skip(6).Take(len).ToArray() : new byte[0];
@@ -1168,32 +1375,15 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                     }
                 }
 
+                string cmdName = ((OtaCommand)cmd).ToString();
+                UpgradeResultCode rxCode = cmd == (ushort)OtaCommand.CMD_NACK ? UpgradeResultCode.NACK
+                    : cmd == (ushort)OtaCommand.CMD_BUSY ? UpgradeResultCode.BUSY
+                    : UpgradeResultCode.OK;
+                AppendStructuredLog(_activeTransport.ToString(), cmdName, len.ToString(), 0, rxCode, matchedPending ? "matched" : "unmatched", Color.DarkCyan);
+
                 if (cmd == (ushort)OtaCommand.CMD_ACK)
                 {
-                    AppendLog("[协议] 收到 ACK（成功应答）", Color.DarkGreen);
                     TryParseAckData(data);
-                }
-                else if (cmd == (ushort)OtaCommand.CMD_NACK)
-                {
-                    AppendLog("[协议] 收到 NACK（失败应答）", Color.OrangeRed);
-                }
-                else if (cmd == (ushort)OtaCommand.CMD_BUSY)
-                {
-                    AppendLog("[协议] 收到 BUSY（设备忙/会话被占用）", Color.DarkOrange);
-                }
-                else if (cmd == (ushort)OtaCommand.CMD_PING)
-                {
-                    string pingText = ToUtf8Display(data);
-                    AppendLog($"[协议] PING回显, Length={data.Length}, Data='{pingText}'", Color.DarkCyan);
-                }
-                else
-                {
-                    AppendLog($"[协议] 收到 Cmd=0x{cmd:X4}, Length={len}", Color.Gray);
-                }
-
-                if (!matchedPending && pending != null && (cmd == (ushort)OtaCommand.CMD_ACK || cmd == (ushort)OtaCommand.CMD_NACK || cmd == (ushort)OtaCommand.CMD_BUSY))
-                {
-                    AppendLog("[协议] 忽略未匹配当前会话窗口的应答帧", Color.Gray);
                 }
             }
         }
@@ -1205,18 +1395,17 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 return;
             }
 
-            // VersionInfo_t: 4 + 4 + 4 + 12 = 24
             if (data.Length == 24)
             {
                 uint bootVersion = BitConverter.ToUInt32(data, 0);
                 uint appVersion = BitConverter.ToUInt32(data, 4);
                 uint hwVersion = BitConverter.ToUInt32(data, 8);
                 string buildDate = Encoding.ASCII.GetString(data, 12, 12).TrimEnd('\0', ' ');
-                AppendLog($"[ACK-VER] boot={bootVersion}, app={appVersion}, hw={hwVersion}, build='{buildDate}'", Color.DarkSlateBlue);
+                AppendStructuredLog(_activeTransport.ToString(), "ACK_VER", "24", 0, UpgradeResultCode.OK,
+                    $"boot={bootVersion},app={appVersion},hw={hwVersion},build={buildDate}", Color.DarkSlateBlue);
                 return;
             }
 
-            // ParamSummary_t(packed): 4 + 4 + 4 + 1 + 1 = 14
             if (data.Length == 14)
             {
                 uint bootVersion = BitConverter.ToUInt32(data, 0);
@@ -1224,11 +1413,12 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 uint runAppVersion = BitConverter.ToUInt32(data, 8);
                 byte appAStatus = data[12];
                 byte appBStatus = data[13];
-                AppendLog($"[ACK-PARAM] boot={bootVersion}, runCnt={bootRunCount}, runApp={runAppVersion}, A={appAStatus}, B={appBStatus}", Color.DarkSlateBlue);
+                AppendStructuredLog(_activeTransport.ToString(), "ACK_PARAM", "14", 0, UpgradeResultCode.OK,
+                    $"boot={bootVersion},runCnt={bootRunCount},runApp={runAppVersion},A={appAStatus},B={appBStatus}", Color.DarkSlateBlue);
                 return;
             }
 
-            AppendLog($"[ACK-DATA] Length={data.Length}", Color.DarkSlateBlue);
+            AppendStructuredLog(_activeTransport.ToString(), "ACK_DATA", data.Length.ToString(), 0, UpgradeResultCode.OK, "ack-payload", Color.DarkSlateBlue);
         }
 
         private string ToUtf8Display(byte[] data)
@@ -1326,16 +1516,30 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                 return;
             }
 
+            TransportKind owner = _activeTransport;
+            if (!TryAcquireUpgradeSession(owner))
+            {
+                MessageBox.Show($"当前已有升级会话占用：{_upgradeSessionOwner}");
+                return;
+            }
+
             uint targetArea = GetSelectedTargetArea();
 
             _isUpgrading = true;
             _abortRequested = false;
             button5.Enabled = false;
 
-            bool ok = await Task.Run(() => RunUpgrade(textBox3.Text, targetArea));
-
-            _isUpgrading = false;
-            button5.Enabled = true;
+            bool ok = false;
+            try
+            {
+                ok = await Task.Run(() => RunUpgrade(textBox3.Text, targetArea));
+            }
+            finally
+            {
+                _isUpgrading = false;
+                button5.Enabled = true;
+                ReleaseUpgradeSession(owner);
+            }
 
             MessageBox.Show(ok ? "升级成功" : "升级失败，请查看日志");
 
@@ -1348,7 +1552,6 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
                     HandleSessionResult(OtaCommand.CMD_RESET, resetResult);
                 });
             }
-       
         }
 
         private void comboBox3_SelectedIndexChanged(object sender, EventArgs e)
@@ -1380,5 +1583,192 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
 
             return DefaultTarget; // APP_A
         }
+
+        private void tabPage1_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void comboBox5_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (_suppressTcpModeChangeEvent)
+            {
+                return;
+            }
+
+            if (_isUpgrading)
+            {
+                _suppressTcpModeChangeEvent = true;
+                comboBox5.SelectedIndex = _lastTcpModeIndex;
+                _suppressTcpModeChangeEvent = false;
+                AppendStructuredLog("WiFi", "MODE_SWITCH", "-", 0, UpgradeResultCode.BUSY, "blocked-during-upgrade", Color.DarkOrange);
+                return;
+            }
+
+            _lastTcpModeIndex = comboBox5.SelectedIndex;
+            bool isServer = IsTcpServerMode();
+
+            // Client模式为远端IP；Server模式为本地监听IP（支持0.0.0.0/any）
+            textBox1.Enabled = true;
+
+            if (_activeTransport == TransportKind.Tcp || _tcpListener != null)
+            {
+                button1.Text = isServer ? "停止监听" : "断开TCP";
+                return;
+            }
+
+            button1.Text = isServer ? "开始监听" : "连接TCP";
+            AppendStructuredLog("WiFi", "MODE_SWITCH", isServer ? "Server" : "Client", 0, UpgradeResultCode.OK, "mode-updated", Color.Gray);
+        }
+
+        private void AppendStructuredLog(string transport, string cmd, string seqOrOffset, int retry, UpgradeResultCode result, string reason, Color color)
+        {
+            string ts = DateTime.Now.ToString("HH:mm:ss.fff");
+            AppendLog($"[{ts}] transport={transport}, cmd={cmd}, seq/offset={seqOrOffset}, retry={retry}, result={result}, reason={reason}", color);
+        }
+
+        private bool TryAcquireUpgradeSession(TransportKind owner)
+        {
+            lock (_upgradeSessionLock)
+            {
+                if (_upgradeSessionOwner != TransportKind.None && _upgradeSessionOwner != owner)
+                {
+                    return false;
+                }
+
+                _upgradeSessionOwner = owner;
+                return true;
+            }
+        }
+
+        private void ReleaseUpgradeSession(TransportKind owner)
+        {
+            lock (_upgradeSessionLock)
+            {
+                if (_upgradeSessionOwner == owner)
+                {
+                    _upgradeSessionOwner = TransportKind.None;
+                }
+            }
+        }
+
+        private void ResetUpgradeStartState()
+        {
+            _abortRequested = false;
+            lock (_sessionLock)
+            {
+                _pendingSession = null;
+            }
+
+            while (_responseEvent.WaitOne(0)) { }
+        }
+
+        private bool IsTransportOnline(TransportKind kind)
+        {
+            if (kind == TransportKind.Serial)
+            {
+                return sp1 != null && sp1.IsOpen;
+            }
+
+            if (kind == TransportKind.Tcp)
+            {
+                lock (_transportLock)
+                {
+                    return _tcpClient != null && _tcpClient.Connected && _tcpStream != null;
+                }
+            }
+
+            return false;
+        }
+
+        private bool TryRecoverTcpConnection(DateTime deadlineUtc)
+        {
+            for (int i = 0; i < ReconnectRetryMax; i++)
+            {
+                if (DateTime.UtcNow > deadlineUtc)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    int port = int.Parse(textBox2.Text.Trim());
+                    if (IsTcpServerMode())
+                    {
+                        if (_tcpListener == null)
+                        {
+                            StartTcpServer(textBox1.Text.Trim(), port);
+                        }
+
+                        DateTime waitUntil = DateTime.UtcNow.AddMilliseconds(ReconnectIntervalMs);
+                        while (DateTime.UtcNow < waitUntil)
+                        {
+                            if (IsTransportOnline(TransportKind.Tcp))
+                            {
+                                AppendStructuredLog("WiFi", "RECONNECT", "-", i + 1, UpgradeResultCode.OK, "server accepted", Color.DarkGreen);
+                                return true;
+                            }
+
+                            Thread.Sleep(100);
+                        }
+                    }
+                    else
+                    {
+                        string host = textBox1.Text.Trim();
+                        OpenTcpTransport(host, port);
+                        if (IsTransportOnline(TransportKind.Tcp))
+                        {
+                            AppendStructuredLog("WiFi", "RECONNECT", "-", i + 1, UpgradeResultCode.OK, "client connected", Color.DarkGreen);
+                            return true;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AppendStructuredLog("WiFi", "RECONNECT", "-", i + 1, UpgradeResultCode.DISCONNECTED, ex.Message, Color.DarkOrange);
+                }
+
+                Thread.Sleep(ReconnectIntervalMs);
+            }
+
+            return false;
+        }
+
+        private void SendAbortIfOnline(string reason)
+        {
+            if (!IsTransportOnline(_activeTransport))
+            {
+                AppendStructuredLog(_activeTransport.ToString(), "CMD_UPDATE_ABORT", "-", 0, UpgradeResultCode.DISCONNECTED, reason, Color.DarkOrange);
+                return;
+            }
+
+            Task.Run(() =>
+            {
+                var abortResult = SendCommandInSingleFlight(OtaCommand.CMD_UPDATE_ABORT, null, StartEndTimeoutMs, false, 0);
+                UpgradeResultCode code = MapResultCode(abortResult.Result);
+                AppendStructuredLog(_activeTransport.ToString(), "CMD_UPDATE_ABORT", "-", 0, code, reason, code == UpgradeResultCode.OK ? Color.DarkGreen : Color.DarkOrange);
+            });
+        }
+
+        private UpgradeResultCode MapResultCode(CommandResultKind result)
+        {
+            switch (result)
+            {
+                case CommandResultKind.Ack:
+                case CommandResultKind.Echo:
+                    return UpgradeResultCode.OK;
+                case CommandResultKind.Nack:
+                    return UpgradeResultCode.NACK;
+                case CommandResultKind.Busy:
+                    return UpgradeResultCode.BUSY;
+                case CommandResultKind.Timeout:
+                    return UpgradeResultCode.TIMEOUT;
+                case CommandResultKind.SendFailed:
+                    return UpgradeResultCode.DISCONNECTED;
+                default:
+                    return UpgradeResultCode.RETRY_EXHAUSTED;
+            }
+        }
+
     }
 }

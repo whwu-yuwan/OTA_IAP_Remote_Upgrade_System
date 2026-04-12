@@ -12,7 +12,8 @@ typedef struct{
 	const char *description;    // 命令描述（调试用）
 }CmdHandlerEntry_t;
 
-extern ProtocolRxBuffer_t g_protocol_rx_buf;
+extern ProtocolRxBuffer_t g_protocol_uart1_rx_buf;
+extern ProtocolRxBuffer_t g_protocol_uart3_rx_buf;
 
 /* ==================== 函数声明 ==================== */
 

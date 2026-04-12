@@ -26,6 +26,7 @@ uint8_t Wifi_ConnectToAP(void);
 uint8_t Wifi_TCPClient_Init(void);
 void Wifi_Init(void);
 uint8_t Wifi_SendDataToESP(const uint8_t* data);
+uint8_t Wifi_SendDataToESP_Len(const uint8_t* data, uint16_t len);
 uint8_t ESP8266_EndTransparentTransmission(void);
 uint8_t ESP8266_StartTransparentTransmission(void);
 
