@@ -34,6 +34,7 @@
 #include "usart.h"
 #include "eth_tcp_server.h"
 #include "lwip/netif.h"
+#include "wifi_at.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -305,6 +306,8 @@ int main(void)
   MX_LWIP_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
+	
+    /*
     Protocol_InitRxBuffer(&g_eth_protocol_rx_buf);
     EthTcpServer_Init(5000, Eth_OnBytes);
     s_eth_prev_connected = EthTcpServer_IsConnected();
@@ -321,6 +324,9 @@ int main(void)
     printf("    SYSCLK:    %du MHz\r\n", HAL_RCC_GetSysClockFreq() / 1000000);
     printf("    Build:     %s %s\r\n", __DATE__, __TIME__);
     printf("\r\n");
+	
+	
+	Wifi_Init();
     
     // 初始化协议处理模块
     Protocol_Handler_Init();
@@ -394,8 +400,11 @@ int main(void)
     if (g_stay_in_bootloader) {
         printf("    Stay in Bootloader permanent wait mode\r\n");
     }
-
+    
 		printf("timeout");
+    */
+	
+    
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -405,6 +414,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    
+    /*
     MX_LWIP_Process();
     EthTcpServer_Poll();
 		
@@ -425,6 +436,7 @@ int main(void)
 					Boot_JumpToRunApp();
 				}
 		}
+    */
   }
   /* USER CODE END 3 */
 }
