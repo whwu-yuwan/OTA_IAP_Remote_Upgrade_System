@@ -322,19 +322,24 @@ int main(void)
     printf("=========================================\r\n");
     printf("\r\n");
 	
+
+
     // 初始化协议处理模块
     Protocol_Handler_Init();
     printf("\r\n");
+    
+    // 打印Flash分区信息
+    //Flash_PrintPartitionInfo();
     
 	// 获取参数区参数
     FlashParam_t param;
     // 加载参数
     if (Param_Load(&param) != 0U) {
-	        printf("Start param init \r\n");
-		    Param_Init(&param);
-			printf("Start param save \r\n");
-			Param_Save(&param);
-		}
+	    printf("Start param init \r\n");
+		Param_Init(&param);
+		printf("Start param save \r\n");
+		Param_Save(&param);
+	}
 		
     // 启动串口接收中断
     printf(">>> Starting UART receive interrupt...\r\n");
@@ -343,7 +348,11 @@ int main(void)
     printf(">>> UART interrupt enabled\r\n");
     printf("\r\n");
 
-    printf(">>> Waiting For CMD...\r\n");		
+    
+
+	g_stay_in_bootloader = 0U;
+    printf(">>> Protocol Test Started...\r\n");
+		
     int tick = HAL_GetTick();
     while((HAL_GetTick() - tick) < 10000) {
         if (g_stay_in_bootloader) {
@@ -406,6 +415,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    
+    
     MX_LWIP_Process();
     EthTcpServer_Poll();
     uint8_t eth_now_connected = EthTcpServer_IsConnected();

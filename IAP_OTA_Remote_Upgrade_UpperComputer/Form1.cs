@@ -1770,5 +1770,9 @@ namespace IAP_OTA_Remote_Upgrade_UpperComputer
             }
         }
 
+        private void textBox5_TextChanged(object sender, EventArgs e)
+        {
+
+        }
     }
 }
